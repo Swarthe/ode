@@ -23,7 +23,7 @@ data = ode_create("root", -1);
 
 Or read its contents from serialised data.
 ```c
-data = ode_read(buffer, buffer_size);
+data = ode_deserial(buffer, buffer_size);
 ```
 ### Storage & manipulation of data
 
@@ -72,7 +72,7 @@ Serialising data for future use:
 unsigned char *buffer;
 size_t buffer_size
 
-buffer = ode_write(data, &buffer_size);
+buffer = ode_serial(data, &buffer_size);
 ```
 
 Freeing all data:

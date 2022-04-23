@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 Emil Overbeck <emil.a.overbeck at gmail.com>
+ * Copyright (C) 2022 Emil Overbeck <emil.a.overbeck at gmail dot com>
  * Subject to the MIT License. See LICENSE.txt for more information.
  *
  */
@@ -10,13 +10,39 @@
 #include "ode.h"
 #include "ode_alloc.h"
 
-#define ODE_ID      0x0de
-#define HAS_VALUE   0x0
-#define HAS_SUB     0x1
-#define HAS_NONE    0x2
+/*
+ *                  Serial format
+ *
+ * Strings are enclosed in double quote '"' characters.
+ *  - "string"
+ * A Rust-inpired raw string format is used when needed.
+ *  - #"str"ing"#
+ *  - ##"str"#ing"##
+ *
+ * All integral objects (a name and value or only a name) are terminated by the
+ * semicolon ';', and their fields are separated by the colon ':'.
+ *  - "name";
+ *  - "name":"value";
+ *
+ * A parent and its subordinates are separated by the pipe '|' character(s), the
+ * number of which is the number of subordinates.
+ *  - "parent"|"child";
+ *  - "parent"|||"1";"2";"3";
+ *
+ */
+
+#define OBJ_SPEC    '|'
+#define OBJ_SEP     ';'
+#define STR_SPEC    '#'
+#define STR_SEP     '"'
+#define FIELD_SEP   ':'
+
+/* String information. */
+#define SERIAL_START(serial, specs)     ((serial) + (specs) + 1)
+#define AS_SERIAL_LEN(real_len, specs)  ((real_len) + 2 * (specs) + 2)
 
 #define LAST_SUB(obj)       ((obj)->sub + (obj)->nsub - 1)
-#define LOOP_SUB(obj, sb)   for (sb = obj->sub; sb <= LAST_SUB(obj); ++sb)
+#define ITER_SUB(obj, sb)   for (sb = obj->sub; sb <= LAST_SUB(obj); ++sb)
 
 #define INIT(obj, sr)               \
     do {                            \
@@ -30,20 +56,9 @@
         (obj)->sub  = NULL;         \
     } while (0)
 
-#define WRITE(dest, val, size)              \
-    do {                                    \
-        memcpy((dest), (val), (size));      \
-        (dest) += (size);                   \
-    } while (0)
-
-#define READ(dest, serial, remain, size)        \
-    do {                                        \
-        memcpy((dest), (serial), (size));       \
-        (serial)   += (size);                   \
-        (remain) -= (size);                     \
-    } while (0)
-
 #define EQ_MEM(a, b, n) (memcmp((a), (b), (n)) == 0)
+
+/* TODO: (README) reference real usage in c-pass (link) */
 
 struct ode_object {
     size_t  name_len, value_len;
@@ -54,136 +69,223 @@ struct ode_object {
     struct ode_object *sur;     /* Parent     */
 };
 
-/* Sets or replaces a string in 'obj' to a copy of 'str' of size 'len' depending
-   on 'mode'. 'str' is treated as a C string if 'len' is '(size_t) -1'. This
-   operation is atomic. Returns 1 on success, otherwise 0 and sets errno. */
-static int set_str(ode_t *obj, enum ode_mode mode, const char *str, size_t len)
+/* Sets or replaces string in 'dest' and its size 'dest_len' to a copy of 'str'
+   of size 'len'. This operation is atomic. Returns 1 on success, otherwise 0
+   and sets errno. */
+static int set_str(char **dest, size_t *dest_len, const char *str, size_t len)
 {
-    char *target;       /* String to set for atomicity */
+    char *new;
 
-    if (len == (size_t) -1) len = strlen(str);
-    target = (mode == ODE_NAME) ? obj->name : obj->value;
+    if (*dest)
+        new = (len != *dest_len) ? ODE_REALLOC(new, len + 1) : *dest;
+    else
+        new = ODE_MALLOC(len + 1);
 
-    /* Reallocate the string if it exists, otherwise create it */
-    if (!(target = target ? ODE_REALLOC(target, len + 1) : ODE_MALLOC(len + 1)))
-        return 0;
+    if (!new) return 0;
+    memcpy(new, str, len);
+    new[len] = '\0';
 
-    memcpy(target, str, len);
-    target[len] = '\0';
-
-    if (mode == ODE_NAME) {
-        obj->name      = target;
-        obj->name_len  = len;
-    } else {
-        obj->value     = target;
-        obj->value_len = len;
-    }
-
+    *dest     = new;
+    *dest_len = len;
     return 1;
 }
 
-/* Deserialises a string from 'serial' of size 'remain' and puts its size in
-   'read_len'. Offsets 'serial' and 'remain'. Returns the string on success,
-   otherwise NULL and sets errno unless 'serial' is invalid. */
-static char *read_str(size_t *read_len,
-                      const unsigned char **serial, size_t *remain)
+/* Extracts information from the string starting at 'serial' with 'end', and
+   copies it to 'real_len' and 'spec_len'. Returns 1 on success, 0 on invalid
+   'serial'. */
+static int info_serial(size_t *real_len, size_t *spec_len,
+                       const char *serial, const char *end)
 {
-    size_t  ret_sz;
-    char   *ret;
+    size_t specs, i;
+    const char *r_start, *r_end;    /* Delimiters of the quoted string */
 
-    if (*remain < sizeof(ret_sz))        return NULL;
-    READ(&ret_sz, *serial, *remain, sizeof(ret_sz));
+    /* Require at least space for a pair of 'STR_SEP' */
+    if (serial >= end) return 0;
 
-    if (*remain < ret_sz)                return NULL;
-    if (!(ret = ODE_MALLOC(ret_sz + 1))) return NULL;
-    READ(ret, *serial, *remain, ret_sz);
-    ret[ret_sz] = '\0';
+    /* Handle opening 'STR_SPEC' */
+    for (specs = 0; serial <= end && *serial != STR_SEP; ++serial) {
+        if (*serial == STR_SPEC)
+            ++specs;
+        else
+            return 0;
+    }
 
-    *read_len = ret_sz;
-    return ret;
+    /* Handle opening 'STR_SEP' */
+    if (serial >= end) return 0;
+    r_start = serial++;
+
+cont:
+    /* Handle string ending */
+    for (; serial <= end; ++serial) {
+        if (*serial == STR_SEP) {
+            r_end = serial;
+
+            if (specs > 0 && serial <= end && *++serial == STR_SPEC) {
+                for (i = 1, ++serial; i < specs; ++serial, ++i) {
+                    if (serial > end)
+                        return 0;
+                    else if (*serial != STR_SPEC)
+                        goto cont;
+                }
+            }
+
+            *real_len = r_end - r_start - 1;    /* -1 for 'STR_SEP' offset */
+            *spec_len = specs;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* Generates information of 'str' of 'len' in serial form and copies it to
+   'serial_len' and 'spec_len', both of which may be NULL.  */
+static void info_as_serial(size_t *serial_len, size_t *spec_len,
+                           const char *str, size_t len)
+{
+    size_t i, hi_specs, specs;
+
+    for (hi_specs = i = 0; i < len; ++str, ++i) {
+        if (*str == STR_SEP) {
+            specs = 1, ++str, ++i;
+            for (; i < len && *str == STR_SPEC; ++specs, ++str, ++i);
+            if (specs > hi_specs) hi_specs = specs;
+        }
+    }
+
+    if (serial_len) *serial_len = AS_SERIAL_LEN(len, hi_specs);
+    if (spec_len)   *spec_len   = hi_specs;
+}
+
+/* Deserialises string from 'serial' of 'end' to 'dest' and copies its size
+   to 'len'. Returns the new 'serial' position for writing on success, otherwise
+   NULL and sets errno unless 'serial' is invalid. */
+static char *deserial_str(char **dest, size_t *len,
+                          const char *serial, const char *end)
+{
+    size_t real_len, specs;
+    char  *real;
+
+    if (!info_serial(&real_len, &specs, serial, end)
+        || !(real = ODE_MALLOC(real_len + 1)))
+        return NULL;
+
+    memcpy(real, SERIAL_START(serial, specs), real_len);
+    real[real_len] = '\0';
+    *dest = real;
+    *len  = real_len;
+
+    return (char *) serial + AS_SERIAL_LEN(real_len, specs);
+}
+
+/* Serialises 'str' of 'len' into 'dest'. Returns the new 'dest' position for
+   writing. */
+static char *serial_str(char *dest, const char *str, size_t len)
+{
+    size_t specs;
+    char *start;
+
+    start = dest;
+    info_as_serial(NULL, &specs, str, len);
+
+    if (specs != 0) memset(dest, STR_SPEC, specs);
+    *(dest += specs) = STR_SEP;
+    memcpy(++dest, str, len);
+    *(dest += len)   = STR_SEP;
+    if (specs != 0) memset(++dest, STR_SPEC, specs);
+
+    return start + AS_SERIAL_LEN(len, specs);
 }
 
 /* Returns the size of 'obj' in serial form. */
-static size_t get_serial_size(const ode_t *obj)
+static size_t size_as_serial(const ode_t *obj)
 {
     const ode_t *sub;
-    size_t ret;
+    size_t ret, len;
 
-    ret = sizeof(obj->name_len) + obj->name_len
-          + sizeof(unsigned char);      /* For subordinate/value identifier */
+    info_as_serial(&ret, NULL, obj->name, obj->name_len);
 
     if (obj->value) {
-        ret += sizeof(obj->value_len) + obj->value_len;
+        info_as_serial(&len, NULL, obj->value, obj->value_len);
+        ret += 1 + len;         /* +1 for preceding 'FIELD_SEP' */
     } else if (obj->sub) {
-        ret += sizeof(obj->nsub);
-
-        LOOP_SUB(obj, sub)
-            ret += get_serial_size(sub);
+        ret += obj->nsub;       /* For 'OBJ_SPEC' */
+        ITER_SUB(obj, sub) ret += size_as_serial(sub);
     }
 
-    return ret;
+    return ret + 1;     /* +1 for 'OBJ_SEP' or 'FIELD_SEP' */
 }
 
-/* Deserialises 'serial' of size 'remain' into 'dest'. Returns the 'serial' read
-   offset on success, otherwise NULL & sets errno unless 'serial' is invalid. */
-static unsigned char *deserial(ode_t *dest, const unsigned char *serial,
-                               size_t *remain)
+/* Deserialises 'serial' with 'end' into 'dest'. Returns a non-NULL pointer on
+   success, otherwise NULL and sets errno unless 'serial' is invalid. */
+static char *mkdeserial(ode_t *dest, const char *serial, const char *end)
 {
-    ode_t *sub;     /* Subordinate of 'obj' if found */
+    ode_t  *sub;
+    size_t  nsub;
 
-    dest->name = read_str(&dest->name_len, &serial, remain);
-    if (!dest->name || *remain == 0) return NULL;
+    if (!(serial = deserial_str(&dest->name, &dest->name_len, serial, end))
+        || serial > end)
+        return NULL;
 
     switch (*serial++) {
-    case HAS_VALUE:
-        dest->value = read_str(&dest->value_len, &serial, remain);
-        if (!dest->value) return NULL;
+    case FIELD_SEP:
+        serial = deserial_str(&dest->value, &dest->value_len, serial, end);
+
+        if (!serial || serial > end || *serial++ != OBJ_SEP)
+            goto fail;
+
         break;
 
-    case HAS_SUB:
-        if (*remain < sizeof(dest->nsub)) return NULL;
-        READ(&dest->nsub, serial, *remain, sizeof(dest->nsub));
+    case OBJ_SPEC:
+        for (nsub = 1; serial <= end && *serial == OBJ_SPEC; ++serial, ++nsub);
+        if (serial >= end) goto fail;
 
-        if (!(sub = dest->sub = ODE_MALLOC(sizeof(*sub) * dest->nsub)))
-            return NULL;
+        if (!(sub = ODE_MALLOC((sizeof(*sub) * nsub))))
+            goto fail;
 
-        /* Recurse into subordinates */
-        LOOP_SUB(dest, sub)  {
+        dest->sub  = sub;
+        dest->nsub = nsub;
+
+        /* Recursively deserialise into subordinates */
+        ITER_SUB(dest, sub)  {
             INIT(sub, dest);
 
-            if (!(serial = deserial(sub, serial, remain)))
-                return NULL;
+            if (!(serial = mkdeserial(sub, serial, end))) {
+                free(dest->sub);
+                goto fail;
+            }
         }
 
         break;
 
-    case HAS_NONE: break;
-    default: return NULL;
+    case OBJ_SEP:   break;
+    default:        goto fail;
     }
 
-    return (unsigned char *) serial;    /* Acts as the offset */
+    return (char *) serial;
+
+fail:
+    free(dest->name);
+    return NULL;
 }
 
-/* Serialises 'obj' into 'dest' without bounds checking. Returns the 'dest'
-   write offset. */
-static unsigned char *serial(unsigned char *dest, const ode_t *obj)
+/* Serialises 'obj' into 'dest'. The return value should be ignored. */
+static char *mkserial(char *dest, const ode_t *obj)
 {
     const ode_t *sub;
 
-    WRITE(dest, &obj->name_len, sizeof(obj->name_len));
-    WRITE(dest, obj->name, obj->name_len);
+    dest = serial_str(dest, obj->name, obj->name_len);
 
-    /* Serialise value and return if no subordinate */
     if (obj->value) {
-        *dest++ = HAS_VALUE;
-        WRITE(dest, &obj->value_len, sizeof(obj->value_len));
-        WRITE(dest, obj->value, obj->value_len);
+        *dest++ = FIELD_SEP;
+        dest = serial_str(dest, obj->value, obj->value_len);
+        *dest++ = OBJ_SEP;
     } else if (obj->sub) {
-        *dest++ = HAS_SUB;
-        WRITE(dest, &obj->nsub, sizeof(obj->nsub));
-        LOOP_SUB(obj, sub) dest = serial(dest, sub);
+        memset(dest, OBJ_SPEC, obj->nsub);
+        dest += obj->nsub;
+        ITER_SUB(obj, sub) dest = mkserial(dest, sub);
     } else {
-        *dest++ = HAS_NONE;
+        *dest++ = OBJ_SEP;
     }
 
     return dest;
@@ -192,7 +294,9 @@ static unsigned char *serial(unsigned char *dest, const ode_t *obj)
 /* Compares C string 'a' and 'b' of size 'b_len'. */
 static int eq_str(const char *a, const char *b, size_t b_len)
 {
-    for (; b_len > 0; ++a, ++b, --b_len)
+    const char *b_term;
+
+    for (b_term = b + b_len; b < b_term; ++a, ++b)
         if (!*a || *a != *b) return 0;
 
     return *a ? 0 : 1;      /* If 'a' is longer than 'b' */
@@ -208,7 +312,7 @@ static void destroy(ode_t *obj)
     if (obj->value) {
         ODE_FREE(obj->value);
     } else if (obj->sub) {
-        LOOP_SUB(obj, o) destroy(o);
+        ITER_SUB(obj, o) destroy(o);
         ODE_FREE(obj->sub);
     }
 }
@@ -218,9 +322,9 @@ static void resur(ode_t *obj)
 {
     ode_t *o, *p;
 
-    LOOP_SUB (obj, o) {
+    ITER_SUB (obj, o) {
         if (o->sub) {
-            LOOP_SUB (o, p)
+            ITER_SUB (o, p)
                 p->sur = o;
         }
     }
@@ -234,8 +338,9 @@ ode_t *ode_create(const char *name, size_t len)
         return NULL;
 
     INIT(ret, NULL);
+    if (len == (size_t) -1) len = strlen(name);
 
-    if (!set_str(ret, ODE_NAME, name, len)) {
+    if (!set_str(&ret->name, &ret->name_len, name, len)) {
         ODE_FREE(ret);
         return NULL;
     }
@@ -243,38 +348,34 @@ ode_t *ode_create(const char *name, size_t len)
     return ret;
 }
 
-ode_t *ode_read(const unsigned char *serial, size_t size)
+ode_t *ode_deserial(const char *serial, size_t size)
 {
     ode_t *ret;
 
-    if (size < sizeof(unsigned char)
-        || --size, *serial++ != ODE_ID
-        || !(ret = ODE_MALLOC(sizeof(*ret))))
+    if (!(ret = ODE_MALLOC(sizeof(*ret))))
         return NULL;
 
     INIT(ret, NULL);
 
-    if (!deserial(ret, serial, &size)) {
-        ODE_FREE(ret);
+    if (!mkdeserial(ret, serial, serial + size - 1)) {
+        free(ret);
         return NULL;
     }
 
     return ret;
 }
 
-unsigned char *ode_write(const ode_t *obj, size_t *serial_size)
+char *ode_serial(const ode_t *obj, size_t *serial_size)
 {
-    unsigned char *ret;
+    char *ret;
     size_t ret_sz;
 
-    ret_sz = get_serial_size(obj)
-             + sizeof(unsigned char);   /* For 'ODE_ID' */
+    ret_sz = size_as_serial(obj);
 
-    if (!(ret = ODE_MALLOC(ret_sz))) return NULL;
-    *ret = ODE_ID;
-    serial(ret + 1, obj);
-    *serial_size = ret_sz;
+    if (!(ret = ODE_MALLOC((*serial_size = ret_sz))))
+        return NULL;
 
+    mkserial(ret, obj);
     return ret;
 }
 
@@ -285,12 +386,12 @@ ode_t *ode_get1(const ode_t *from, const char *name, size_t len)
     if (!from->sub) return NULL;
 
     if (len == (size_t) -1) {
-        LOOP_SUB(from, o) {
+        ITER_SUB(from, o) {
             if (eq_str(name, o->name, o->name_len))
                 return (ode_t *) o;
         }
     } else {
-        LOOP_SUB(from, o) {
+        ITER_SUB(from, o) {
             if (o->name_len == len && EQ_MEM(o->name, name, len))
                 return (ode_t *) o;
         }
@@ -310,7 +411,7 @@ ode_t *ode_get(const ode_t *from, ...)
 next_arg:
     while ((arg = va_arg(ap, const char *))) {
         if (from->sub) {
-            LOOP_SUB(from, o) {
+            ITER_SUB(from, o) {
                 if (eq_str(arg, o->name, o->name_len)) {
                     /* Iterate into match */
                     from = o;
@@ -321,23 +422,22 @@ next_arg:
 
         /* No matches found or possible */
         from = NULL;
-        goto done;
+        break;
     }
 
-done:
     va_end(ap);
     return (ode_t *) from;      /* Is original 'from' if no arguments */
 }
 
-const char *ode_getstr(const ode_t *from, enum ode_mode mode)
+const char *ode_getstr(const ode_t *from, enum ode_type type)
 {
     /* 'from->value' is NULL if 'from' has no value. */
-    return (mode == ODE_NAME) ? from->name : from->value;
+    return (type == ODE_NAME) ? from->name : from->value;
 }
 
-size_t ode_getlen(const ode_t *from, enum ode_mode mode)
+size_t ode_getlen(const ode_t *from, enum ode_type type)
 {
-    if (mode == ODE_NAME) {
+    if (type == ODE_NAME) {
         return from->name_len;
     } else {
         return from->value ? from->value_len : (size_t) -1;
@@ -356,17 +456,23 @@ ode_t *ode_iter(const ode_t *obj, const ode_t *pos)
     }
 }
 
-ode_t *ode_mod(ode_t *obj, enum ode_mode mode, const char *str, size_t len)
+ode_t *ode_mod(ode_t *obj, enum ode_type type, const char *str, size_t len)
 {
+
     /* Object may not have value and child */
-    if (mode == ODE_VALUE && obj->sub)
+    if (type == ODE_VALUE && obj->sub)
         return NULL;
+
+    if (len == (size_t) -1) len = strlen(str);
 
     /* Prevent name duplication */
-    if (obj->sub && mode == ODE_NAME && ode_get1(obj->sur, str, len))
+    if (type == ODE_NAME && obj->sur && ode_get1(obj->sur, str, len))
         return NULL;
 
-    return set_str(obj, mode, str, len) ? obj : NULL;
+    if (type == ODE_NAME)
+        return set_str(&obj->name, &obj->name_len, str, len) ? obj : NULL;
+    else
+        return set_str(&obj->value, &obj->value_len, str, len) ? obj : NULL;
 }
 
 ode_t *ode_add(ode_t *to, const char *name, size_t len)
@@ -390,9 +496,10 @@ ode_t *ode_add(ode_t *to, const char *name, size_t len)
     }
 
     INIT(add, to);
+    if (len == (size_t) -1) len = strlen(name);
 
     /* Reset on failure to set name for atomicity */
-    if (!set_str(add, ODE_NAME, name, len)) {
+    if (!set_str(&add->name, &add->name_len, name, len)) {
         if (to->nsub == 0) {
             ODE_FREE(new_sub);
             to->sub = NULL;
@@ -402,7 +509,7 @@ ode_t *ode_add(ode_t *to, const char *name, size_t len)
     }
 
     to->sub = new_sub;
-    if (moved) resur(to);       /* Will not affect 'add' (already correct). */
+    if (moved) resur(to);       /* Does not affect 'add' (already correct). */
     ++to->nsub;
     return add;
 }
@@ -426,16 +533,16 @@ int ode_del(ode_t *obj)
     sur = obj->sur;
 
     if (sur->nsub > 1) {
-        /* The order of objects is meaningless; replace the now empty object
-           with the last one if needed before shrinking */
-        if (obj != LAST_SUB(sur)) {
-            backup = *obj;
-            *obj   = *LAST_SUB(sur);
-        }
+        backup = *obj;
+
+        /* The order of objects is meaningless; replace the object with the last
+           one if needed before shrinking */
+        if (obj != LAST_SUB(sur))
+            *obj = *LAST_SUB(sur);
 
         new_sub = ODE_REALLOC(sur->sub, sizeof(*sur->sub) * sur->nsub - 1);
 
-        /* Reset on failure to shrink for atomicity */
+        /* Reset on failure to shrink */
         if (!new_sub) {
             if (obj != LAST_SUB(sur)) *obj = backup;
             return 0;
@@ -466,6 +573,6 @@ void ode_zero(ode_t *obj, void (*zero_fn)(void *, size_t))
         zero_fn(obj->value, obj->value_len);
         zero_fn(&obj->value_len, sizeof(obj->value_len));
     } else if (obj->sub) {
-        LOOP_SUB(obj, o) ode_zero(o, zero_fn);
+        ITER_SUB(obj, o) ode_zero(o, zero_fn);
     }
 }

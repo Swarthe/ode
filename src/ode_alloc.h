@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 Emil Overbeck <emil.a.overbeck at gmail.com>
+ * Copyright (C) 2022 Emil Overbeck <emil.a.overbeck at gmail dot com>
  * Subject to the MIT License. See LICENSE.txt for more information.
  *
  */
