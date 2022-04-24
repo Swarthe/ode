@@ -19,8 +19,8 @@
  *  - #"str"ing"#
  *  - ##"str"#ing"##
  *
- * All integral objects (a name and value or only a name) are terminated by the
- * semicolon ';', and their fields are separated by the colon ':'.
+ * All integral objects (a name and value or only a name) are terminated by a
+ * semicolon ';', and their fields are separated by a colon ':'.
  *  - "name";
  *  - "name":"value";
  *
@@ -77,7 +77,7 @@ static int set_str(char **dest, size_t *dest_len, const char *str, size_t len)
     char *new;
 
     if (*dest)
-        new = (len != *dest_len) ? ODE_REALLOC(new, len + 1) : *dest;
+        new = (len != *dest_len) ? ODE_REALLOC(*dest, len + 1) : *dest;
     else
         new = ODE_MALLOC(len + 1);
 
@@ -92,7 +92,7 @@ static int set_str(char **dest, size_t *dest_len, const char *str, size_t len)
 
 /* Extracts information from the string starting at 'serial' with 'end', and
    copies it to 'real_len' and 'spec_len'. Returns 1 on success, 0 on invalid
-   'serial'. */
+   string at 'serial'. */
 static int info_serial(size_t *real_len, size_t *spec_len,
                        const char *serial, const char *end)
 {
@@ -120,13 +120,14 @@ cont:
         if (*serial == STR_SEP) {
             r_end = serial;
 
-            if (specs > 0 && serial <= end && *++serial == STR_SPEC) {
-                for (i = 1, ++serial; i < specs; ++serial, ++i) {
-                    if (serial > end)
-                        return 0;
-                    else if (*serial != STR_SPEC)
-                        goto cont;
-                }
+            if (specs > 0) {
+                i = 1;
+
+                do {
+                    ++serial;
+                    if (serial > end)        return 0;
+                    if (*serial != STR_SPEC) goto cont;
+                } while (i++ < specs);
             }
 
             *real_len = r_end - r_start - 1;    /* -1 for 'STR_SEP' offset */
@@ -138,30 +139,30 @@ cont:
     return 0;
 }
 
-/* Generates information of 'str' of 'len' in serial form and copies it to
-   'serial_len' and 'spec_len', both of which may be NULL.  */
-static void info_as_serial(size_t *serial_len, size_t *spec_len,
-                           const char *str, size_t len)
+/* Returns the numbers of 'STR_SPEC' of 'str' of 'len' in serial form. */
+static size_t nspec(const char *str, size_t len)
 {
-    size_t i, hi_specs, specs;
+    const char *term;
+    size_t hi_specs, specs;
 
-    for (hi_specs = i = 0; i < len; ++str, ++i) {
+    term = str + len;
+
+    for (hi_specs = 0; str < term; ++str) {
         if (*str == STR_SEP) {
-            specs = 1, ++str, ++i;
-            for (; i < len && *str == STR_SPEC; ++specs, ++str, ++i);
+            specs = 1, ++str;
+            for (; str < term && *str == STR_SPEC; ++specs, ++str);
             if (specs > hi_specs) hi_specs = specs;
         }
     }
 
-    if (serial_len) *serial_len = AS_SERIAL_LEN(len, hi_specs);
-    if (spec_len)   *spec_len   = hi_specs;
+    return hi_specs;
 }
 
 /* Deserialises string from 'serial' of 'end' to 'dest' and copies its size
    to 'len'. Returns the new 'serial' position for writing on success, otherwise
    NULL and sets errno unless 'serial' is invalid. */
-static char *deserial_str(char **dest, size_t *len,
-                          const char *serial, const char *end)
+static const char *deserial_str(char **dest, size_t *len,
+                                const char *serial, const char *end)
 {
     size_t real_len, specs;
     char  *real;
@@ -175,7 +176,7 @@ static char *deserial_str(char **dest, size_t *len,
     *dest = real;
     *len  = real_len;
 
-    return (char *) serial + AS_SERIAL_LEN(real_len, specs);
+    return serial + AS_SERIAL_LEN(real_len, specs);
 }
 
 /* Serialises 'str' of 'len' into 'dest'. Returns the new 'dest' position for
@@ -186,13 +187,13 @@ static char *serial_str(char *dest, const char *str, size_t len)
     char *start;
 
     start = dest;
-    info_as_serial(NULL, &specs, str, len);
+    specs = nspec(str, len);
 
     if (specs != 0) memset(dest, STR_SPEC, specs);
     *(dest += specs) = STR_SEP;
     memcpy(++dest, str, len);
     *(dest += len)   = STR_SEP;
-    if (specs != 0) memset(++dest, STR_SPEC, specs);
+    if (specs != 0) memset(dest + 1, STR_SPEC, specs);
 
     return start + AS_SERIAL_LEN(len, specs);
 }
@@ -201,13 +202,14 @@ static char *serial_str(char *dest, const char *str, size_t len)
 static size_t size_as_serial(const ode_t *obj)
 {
     const ode_t *sub;
-    size_t ret, len;
+    size_t ret;
 
-    info_as_serial(&ret, NULL, obj->name, obj->name_len);
+    ret = AS_SERIAL_LEN(obj->name_len, nspec(obj->name, obj->name_len));
 
     if (obj->value) {
-        info_as_serial(&len, NULL, obj->value, obj->value_len);
-        ret += 1 + len;         /* +1 for preceding 'FIELD_SEP' */
+        /* +1 for preceding 'FIELD_SEP' */
+        ret += 1 + AS_SERIAL_LEN(obj->value_len,
+                                 nspec(obj->value, obj->value_len));
     } else if (obj->sub) {
         ret += obj->nsub;       /* For 'OBJ_SPEC' */
         ITER_SUB(obj, sub) ret += size_as_serial(sub);

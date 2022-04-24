@@ -69,8 +69,8 @@ for (o = ode_iter(data, NULL); o; o = ode_iter(data, o))
 
 Serialising data for future use:
 ```c
-unsigned char *buffer;
-size_t buffer_size
+char *buffer;
+size_t buffer_size;
 
 buffer = ode_serial(data, &buffer_size);
 ```
