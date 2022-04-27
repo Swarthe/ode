@@ -145,9 +145,7 @@ static size_t nspec(const char *str, size_t len)
     const char *term;
     size_t hi_specs, specs;
 
-    term = str + len;
-
-    for (hi_specs = 0; str < term; ++str) {
+    for (term = str + len, hi_specs = 0; str < term; ++str) {
         if (*str == STR_SEP) {
             specs = 1, ++str;
             for (; str < term && *str == STR_SPEC; ++specs, ++str);
@@ -207,15 +205,17 @@ static size_t size_as_serial(const ode_t *obj)
     ret = AS_SERIAL_LEN(obj->name_len, nspec(obj->name, obj->name_len));
 
     if (obj->value) {
-        /* +1 for preceding 'FIELD_SEP' */
-        ret += 1 + AS_SERIAL_LEN(obj->value_len,
+        /* +2 for 'OBJ_SEP' and preceding 'FIELD_SEP' */
+        ret += 2 + AS_SERIAL_LEN(obj->value_len,
                                  nspec(obj->value, obj->value_len));
     } else if (obj->sub) {
         ret += obj->nsub;       /* For 'OBJ_SPEC' */
         ITER_SUB(obj, sub) ret += size_as_serial(sub);
+    } else {
+        ++ret;      /* For 'FIELD_SEP' */
     }
 
-    return ret + 1;     /* +1 for 'OBJ_SEP' or 'FIELD_SEP' */
+    return ret;
 }
 
 /* Deserialises 'serial' with 'end' into 'dest'. Returns a non-NULL pointer on
@@ -374,10 +374,11 @@ char *ode_serial(const ode_t *obj, size_t *serial_size)
 
     ret_sz = size_as_serial(obj);
 
-    if (!(ret = ODE_MALLOC((*serial_size = ret_sz))))
+    if (!(ret = ODE_MALLOC(ret_sz)))
         return NULL;
 
     mkserial(ret, obj);
+    *serial_size = ret_sz;
     return ret;
 }
 
