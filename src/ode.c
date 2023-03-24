@@ -252,7 +252,7 @@ static char *mkdeserial(ode_t *dest, const char *serial, const char *end)
             INIT(sub, dest);
 
             if (!(serial = mkdeserial(sub, serial, end))) {
-                free(dest->sub);
+                ODE_FREE(dest->sub);
                 goto fail;
             }
         }
@@ -266,7 +266,7 @@ static char *mkdeserial(ode_t *dest, const char *serial, const char *end)
     return (char *) serial;
 
 fail:
-    free(dest->name);
+    ODE_FREE(dest->name);
     return NULL;
 }
 
