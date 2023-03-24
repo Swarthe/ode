@@ -195,6 +195,6 @@ int ode_del(ode_t *obj);
  * and length info is lost.
  *
  */
-void ode_zero(ode_t *obj, void (*zero_fn)(void *, size_t));
+void ode_zero(ode_t *obj, void (*zero_fn)(void *s, size_t n));
 
 #endif /* ODE_H */

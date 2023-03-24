@@ -41,10 +41,11 @@
 #define SERIAL_START(serial, specs)     ((serial) + (specs) + 1)
 #define AS_SERIAL_LEN(real_len, specs)  ((real_len) + 2 * (specs) + 2)
 
+/* Subordinate object operations. */
 #define LAST_SUB(obj)       ((obj)->sub + (obj)->nsub - 1)
 #define ITER_SUB(obj, sb)   for (sb = obj->sub; sb <= LAST_SUB(obj); ++sb)
 
-#define INIT(obj, sr)               \
+#define INIT(obj, parent)           \
     do {                            \
         (obj)->name_len  = 0;       \
         (obj)->name      = NULL;    \
@@ -52,13 +53,11 @@
         (obj)->value     = NULL;    \
                                     \
         (obj)->nsub = 0;            \
-        (obj)->sur  = (sr);         \
+        (obj)->sur  = (parent);     \
         (obj)->sub  = NULL;         \
     } while (0)
 
 #define EQ_MEM(a, b, n) (memcmp((a), (b), (n)) == 0)
-
-/* TODO: (README) reference real usage in c-pass (link) */
 
 struct ode_object {
     size_t  name_len, value_len;
@@ -212,7 +211,7 @@ static size_t size_as_serial(const ode_t *obj)
         ret += obj->nsub;       /* For 'OBJ_SPEC' */
         ITER_SUB(obj, sub) ret += size_as_serial(sub);
     } else {
-        ++ret;      /* For 'FIELD_SEP' */
+        ret += 1;       /* For 'FIELD_SEP' */
     }
 
     return ret;
@@ -260,8 +259,8 @@ static char *mkdeserial(ode_t *dest, const char *serial, const char *end)
 
         break;
 
-    case OBJ_SEP:   break;
-    default:        goto fail;
+    case OBJ_SEP : break;
+    default      : goto fail;
     }
 
     return (char *) serial;
@@ -565,7 +564,7 @@ int ode_del(ode_t *obj)
     return 1;
 }
 
-void ode_zero(ode_t *obj, void (*zero_fn)(void *, size_t))
+void ode_zero(ode_t *obj, void (*zero_fn)(void *s, size_t n))
 {
     ode_t *o;
 
