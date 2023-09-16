@@ -5,7 +5,14 @@ with a focus on simplicity, security and efficiency.
 
 ## Installation
 
-Include the files in `src/` in a C project and compile them together.
+```
+git clone https://github.com/Swarthe/ode
+```
+
+Include the header files `src/*.h` where they are needed, and compile the source
+files `src/*.c` together with your project.
+
+You may optionally modify `src/ode_alloc.h` to use your preferred allocator.
 
 ## Usage
 
